@@ -1,4 +1,4 @@
-
+import re
 import ollama
 
 
@@ -136,3 +136,153 @@ if __name__ == "__main__":
     print("\nGEMMA RESPONSE")
     print("=" * 50)
     print(answer)
+
+def verify_quote(quote, document_text):
+    """Check whether a quotation appears in the supplied document text."""
+
+    if not isinstance(quote, str) or not quote.strip():
+        return False
+
+    if not isinstance(document_text, str) or not document_text.strip():
+        return False
+
+    # Normalize whitespace and capitalization before comparing.
+    normalized_quote = " ".join(quote.split()).casefold()
+    normalized_document = " ".join(document_text.split()).casefold()
+
+    return normalized_quote in normalized_document
+
+def verify_answer_evidence(answer, document_text):
+    """Check the supporting-quotation section of an answer."""
+
+    if not isinstance(answer, str) or not answer.strip():
+        return {
+            "status": "UNVERIFIED",
+            "message": "The answer is empty.",
+        }
+
+    if not isinstance(document_text, str) or not document_text.strip():
+        return {
+            "status": "UNVERIFIED",
+            "message": "Document text is empty.",
+        }
+
+    # Find the section labelled SUPPORTING QUOTATION.
+    match = re.search(
+        r"supporting quotation\s*:?\s*(.*?)(?=\n\s*\d*\.?\s*[A-Z][A-Z /_-]{2,}\s*:?\s*\n|\Z)",
+        answer,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    if not match:
+        return {
+            "status": "UNVERIFIED",
+            "message": "No supporting-quotation section was found.",
+        }
+
+    quote_section = match.group(1).strip()
+
+    if not quote_section:
+        return {
+            "status": "UNVERIFIED",
+            "message": "The supporting-quotation section is empty.",
+        }
+
+    # Remove common Markdown blockquote markers and surrounding quotes.
+    quote = re.sub(r"(?m)^\s*>\s?", "", quote_section).strip()
+    quote = quote.strip(" \t\r\n\"'“”‘’")
+
+    if verify_quote(quote, document_text):
+        return {
+            "status": "VERIFIED",
+            "message": "The supporting quotation appears in the supplied document text.",
+            "quote": quote,
+        }
+
+    return {
+        "status": "UNVERIFIED",
+        "message": "The supporting quotation could not be matched to the supplied document text.",
+        "quote": quote,
+    }
+
+def ask_about_document_with_verification(document_text, question):
+    """Answer a document question and check its cited quotation."""
+
+    answer = ask_about_document(document_text, question)
+
+    evidence_check = verify_answer_evidence(
+        answer,
+        document_text,
+    )
+
+    return {
+        "answer": answer,
+        "evidence_check": evidence_check,
+    }
+
+def passages_to_document_text(passages):
+    """Convert extracted PDF passages into text for Gemma."""
+
+    if not isinstance(passages, list) or not passages:
+        raise ValueError("Passages must be a non-empty list.")
+
+    formatted_passages = []
+
+    for passage in passages:
+        if not isinstance(passage, dict):
+            raise ValueError("Each passage must be a dictionary.")
+
+        passage_id = passage.get("id")
+        page = passage.get("page")
+        passage_text = passage.get("text")
+
+        if not passage_id or page is None:
+            raise ValueError("Each passage needs an ID and page number.")
+
+        if not isinstance(passage_text, str) or not passage_text.strip():
+            raise ValueError("Each passage needs non-empty text.")
+
+        formatted_passages.append(
+            f"Passage ID: {passage_id}\n"
+            f"Page: {page}\n"
+            f"Text: {passage_text.strip()}"
+        )
+
+    return "\n\n".join(formatted_passages)
+
+def ask_about_passages(passages, question):
+    """Answer a question using extracted PDF passages."""
+
+    document_text = passages_to_document_text(passages)
+
+    return ask_about_document_with_verification(
+        document_text,
+        question,
+    )
+
+def verify_passage_evidence(answer, passages):
+    """Find the source passage and page for a supporting quotation."""
+
+    document_text = passages_to_document_text(passages)
+
+    check = verify_answer_evidence(answer, document_text)
+
+    if check["status"] != "VERIFIED":
+        return check
+
+    quote = check["quote"]
+
+    for passage in passages:
+        if verify_quote(quote, passage.get("text", "")):
+            return {
+                "status": "VERIFIED",
+                "message": "Quotation matched to a source passage.",
+                "quote": quote,
+                "passage_id": passage["id"],
+                "page": passage["page"],
+            }
+
+    return {
+        "status": "UNVERIFIED",
+        "message": "Could not match the quotation to an individual passage.",
+    }
