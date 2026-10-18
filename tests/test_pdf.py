@@ -1,15 +1,47 @@
 import sys
 from pathlib import Path
 
+import pymupdf
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# pyrefly: ignore[missing-import]
-import pytest
-from pdf import extract_document, extract_pdf, extract_text_document, find_relevant_passages
+from pdf import (
+    extract_document,
+    extract_pdf,
+    extract_text_document,
+    find_relevant_passages,
+    normalize_text,
+    segment_clauses,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = PROJECT_ROOT / "tests" / "fixtures"
+
+
+@pytest.fixture
+def sample_pdf(tmp_path):
+    """Create a temporary PDF for testing."""
+    pdf_path = tmp_path / "sample.pdf"
+
+    document = pymupdf.open()
+    page1 = document.new_page()
+    page1.insert_text(
+        (72, 72),
+        "A tenant must provide 30 days written notice."
+    )
+
+    page2 = document.new_page()
+    page2.insert_text(
+        (72, 72),
+        "The security deposit must be returned within 15 days."
+    )
+
+    document.save(pdf_path)
+    document.close()
+
+    return pdf_path
 
 
 def test_extract_pdf_valid():
@@ -92,14 +124,12 @@ def test_preserve_page_numbers():
 
 
 def test_normalize_rejoins_hyphenated_line_breaks_and_smart_quotes():
-    from pdf import normalize_text
     out = normalize_text("Landlord may terminate with-\nout notice. Tenant’s “deposit”")
     assert "without notice" in out
     assert "Tenant's \"deposit\"" in out
 
 
 def test_segment_clauses_keeps_abbreviations_and_clause_ids():
-    from pdf import segment_clauses
     pages = [
         {"page": 1, "text": "3.1 The Tenant shall pay Rs. 5,000 per month.\n3.2 Landlord may terminate the lease\nif rent is unpaid."},
         {"page": 2, "text": "unless cured within 7 days.\n4. Deposits are refundable after vacating."},
@@ -121,6 +151,41 @@ def test_retrieval_uses_stemming_and_synonyms_and_returns_nothing_off_topic():
     hit = find_relevant_passages(pages, "Can the landlord evict me?")
     assert hit and hit[0]["clause_id"] == "3.2"
     assert find_relevant_passages(pages, "What is the weather today?") == []
+
+
+def test_extract_pdf_returns_pages(sample_pdf):
+    pages = extract_pdf(sample_pdf)
+    assert len(pages) == 2
+
+
+def test_extract_pdf_preserves_page_text(sample_pdf):
+    pages = extract_pdf(sample_pdf)
+    combined_text = str(pages)
+    assert "30 days written notice" in combined_text
+    assert "security deposit" in combined_text
+
+
+def test_find_relevant_passages_from_fixture(sample_pdf):
+    pages = extract_pdf(sample_pdf)
+    passages = find_relevant_passages(
+        pages,
+        "How many days notice must a tenant provide?"
+    )
+    assert passages
+    assert any(
+        "30 days written notice" in passage["text"]
+        for passage in passages
+    )
+
+
+def test_passages_include_page_numbers(sample_pdf):
+    pages = extract_pdf(sample_pdf)
+    passages = find_relevant_passages(
+        pages,
+        "How many days notice must a tenant provide?"
+    )
+    assert passages
+    assert all("page" in passage for passage in passages)
 
 
 if __name__ == "__main__":

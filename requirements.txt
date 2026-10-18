@@ -1,3 +1,5 @@
 pymupdf==1.28.2
 ollama>=0.6.0
+pypdf
 pytest>=8.0.0
+streamlit

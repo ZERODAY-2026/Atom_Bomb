@@ -1,10 +1,10 @@
 """
-Safety and Privacy Module for Private Legal Document Triage Agent.
+Safety and Privacy Module for Private Legal Document Triage Agent (ClauseGuard).
 
 Enforces:
 1. Strict local-only processing with zero external data transmission.
 2. Prompt injection defense isolating untrusted document content.
-3. Non-lawyer disclaimer enforcement.
+3. Non-lawyer disclaimer enforcement and high-stakes question warnings.
 4. Citation validation and hallucination checks.
 """
 
@@ -19,15 +19,32 @@ LEGAL_DISCLAIMER = (
     "Always consult a qualified legal professional licensed in your jurisdiction."
 )
 
-SUSPICIOUS_INJECTION_PATTERNS = [
-    r"ignore\s+(?:all\s+)?(?:previous|prior)\s+instructions",
+# Questions that may require professional legal judgment.
+HIGH_STAKES_PATTERNS = [
+    r"\bshould i sign\b",
+    r"\bshould i sue\b",
+    r"\bshould i file a case\b",
+    r"\bcan i legally\b",
+    r"\bis this clause legal\b",
+    r"\bis this contract valid\b",
+    r"\bwill i win\b",
+    r"\bwhat legal action should i take\b",
+    r"\bcan i terminate (?:this|the) contract\b",
+]
+
+# Common signs of instructions embedded in untrusted document text.
+INJECTION_PATTERNS = [
+    r"ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions",
     r"you\s+are\s+now\s+(?:a|an)\s+",
-    r"disregard\s+(?:all\s+)?(?:safety|system)\s+rules",
+    r"disregard\s+(?:all\s+)?(?:safety|system|previous|prior|above)\s+rules",
     r"override\s+(?:all\s+)?prompts",
     r"system\s*:\s*",
     r"<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>",
     r"\[SYSTEM(?:\s+PROMPT)?\]",
     r"new\s+operating\s+mode",
+    r"reveal\s+(?:the\s+)?(?:system\s+prompt|hidden\s+instructions)",
+    r"print\s+(?:your\s+)?(?:system\s+prompt|hidden\s+instructions)",
+    r"act\s+as\s+(?:a\s+)?(?:different|new)\s+assistant",
 ]
 
 
@@ -59,19 +76,95 @@ def verify_local_privacy(ollama_url="http://127.0.0.1:11434"):
     }
 
 
+def check_question_safety(question):
+    """
+    Identify questions that may need a legal-professional warning.
+    This does not reject the question. It flags the need for caution.
+    """
+    if not isinstance(question, str) or not question.strip():
+        return {
+            "requires_caution": True,
+            "reason": "The question is empty or invalid.",
+        }
+
+    normalized_question = question.casefold()
+
+    for pattern in HIGH_STAKES_PATTERNS:
+        if re.search(pattern, normalized_question):
+            return {
+                "requires_caution": True,
+                "reason": (
+                    "This question may require professional legal "
+                    "judgment. ClauseGuard can explain document text "
+                    "but cannot make the legal decision for you."
+                ),
+            }
+
+    return {
+        "requires_caution": False,
+        "reason": "",
+    }
+
+
+class InjectionResult(dict):
+    """Result for prompt injection detection with list and dict compatibility."""
+
+    def __init__(self, matches=None):
+        m = list(matches or [])
+        super().__init__({"detected": bool(m), "matches": m})
+        self._matches = m
+
+    def __eq__(self, other):
+        if isinstance(other, list):
+            return self._matches == other
+        return super().__eq__(other)
+
+    def __len__(self):
+        return len(self._matches)
+
+    def __iter__(self):
+        return iter(self._matches)
+
+
 def detect_prompt_injection(text):
     """
     Check for potential prompt injection attempts in user input or documents.
-    Returns a list of matched risk patterns.
+    Returns an InjectionResult that acts as both a list of matches and a
+    dict with 'detected' and 'matches' keys.
     """
-    if not isinstance(text, str):
-        return []
+    if not isinstance(text, str) or not text.strip():
+        return InjectionResult([])
 
-    flags = []
-    for pattern in SUSPICIOUS_INJECTION_PATTERNS:
+    matches = []
+    for pattern in INJECTION_PATTERNS:
         if re.search(pattern, text, flags=re.IGNORECASE):
-            flags.append(pattern)
-    return flags
+            matches.append(pattern)
+    return InjectionResult(matches)
+
+
+def build_safety_notice(question, document_text):
+    """Create safety notices for the application to display."""
+    question_check = check_question_safety(question)
+    injection_check = detect_prompt_injection(document_text)
+
+    notices = []
+
+    if question_check["requires_caution"]:
+        notices.append(question_check["reason"])
+
+    if injection_check["detected"]:
+        notices.append(
+            "This document contains instruction-like text that may "
+            "be untrusted. It will be treated as document content, "
+            "not as instructions for the assistant."
+        )
+
+    return {
+        "requires_caution": question_check["requires_caution"],
+        "prompt_injection_detected": injection_check["detected"],
+        "matches": injection_check["matches"],
+        "notices": notices,
+    }
 
 
 def sanitize_question(question):

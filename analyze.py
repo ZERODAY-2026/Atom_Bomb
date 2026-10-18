@@ -7,8 +7,10 @@ import urllib.request
 import ollama
 
 from pdf import normalize_for_match
+import safety
 from safety import (
     audit_response_safety,
+    build_safety_notice,
     get_legal_disclaimer,
     sanitize_document_content,
     sanitize_question,
@@ -37,7 +39,6 @@ SAFETY AND ACCURACY RULES:
 12. Do not claim the whole document lacks something if only an excerpt
     was provided.
 """
-
 
 NO_EVIDENCE_ANSWER = (
     "I could not find supporting information in the supplied document. "
@@ -247,9 +248,15 @@ def ask_about_document_with_verification(document_text, question):
         document_text,
     )
 
+    safety_result = build_safety_notice(
+        question,
+        document_text,
+    )
+
     return {
         "answer": answer,
         "evidence_check": evidence_check,
+        "safety": safety_result,
     }
 
 
@@ -300,6 +307,7 @@ def ask_about_passages(passages, question):
                 "status": "NO_EVIDENCE",
                 "message": "No relevant passage was found in the document.",
             },
+            "safety": build_safety_notice(question, ""),
         }
 
     document_text = passages_to_document_text(passages)
