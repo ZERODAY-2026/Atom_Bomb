@@ -1,11 +1,21 @@
+
 __pycache__/
 *.py[cod]
 .venv/
 venv/
 .env
+
+# Local legal documents
 *.pdf
 *.txt
 !requirements.txt
 *.docx
 *.doc
+
+# Local SQLite history and databases
+data/
+*.db
+*.sqlite
+*.sqlite3
+
 .DS_Store

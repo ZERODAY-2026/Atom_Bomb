@@ -1,6 +1,6 @@
 import re
 import ollama
-
+import safety
 
 MODEL_NAME = "gemma4:e2b"
 
@@ -206,8 +206,6 @@ def verify_answer_evidence(answer, document_text):
     }
 
 def ask_about_document_with_verification(document_text, question):
-    """Answer a document question and check its cited quotation."""
-
     answer = ask_about_document(document_text, question)
 
     evidence_check = verify_answer_evidence(
@@ -215,9 +213,15 @@ def ask_about_document_with_verification(document_text, question):
         document_text,
     )
 
+    safety_result = safety.build_safety_notice(
+        question,
+        document_text,
+    )
+
     return {
         "answer": answer,
         "evidence_check": evidence_check,
+        "safety": safety_result,
     }
 
 def passages_to_document_text(passages):
