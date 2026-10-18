@@ -1,5 +1,8 @@
 import json
+import os
+import re
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -10,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
 
 import analyze
 import eval_cuad  # pyright: ignore[reportMissingImports]
+import pdf
 import storage
 
 # ---------- PAGE CONFIGURATION ----------
@@ -220,24 +224,23 @@ def extract_text(uploaded_file):
     filename = uploaded_file.name.lower()
 
     if filename.endswith(".pdf"):
-        pdf = pymupdf.open(
-            stream=file_bytes,
-            filetype="pdf",
-        )
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
 
         try:
-            pages = []
-            for page_idx in range(len(pdf)):
-                page_number = page_idx + 1
-                page = pdf[page_idx]
-                page_text = str(page.get_text("text")).strip()
-
-                if page_text:
-                    pages.append(f"Page {page_number}:\n{page_text}")
-
-            document_text = "\n\n".join(pages)
+            pages = pdf.extract_pdf(tmp_path)
+            formatted = []
+            for p in pages:
+                p_text = p.get("text", "").strip()
+                if p_text:
+                    formatted.append(f"Page {p['page']}:\n{p_text}")
+            document_text = "\n\n".join(formatted)
         finally:
-            pdf.close()
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
         if not document_text.strip():
             raise ValueError(
@@ -247,7 +250,7 @@ def extract_text(uploaded_file):
         return document_text
 
     elif filename.endswith(".txt") or filename.endswith(".md"):
-        document_text = file_bytes.decode("utf-8-sig")
+        document_text = pdf.normalize_text(file_bytes.decode("utf-8-sig"))
         if not document_text.strip():
             raise ValueError("The uploaded text document is empty.")
         return document_text
@@ -537,6 +540,28 @@ if page == "Document analysis":
 
         st.markdown("## 2. Document overview")
         st.caption(f"Loaded document: {st.session_state.document_name}")
+
+        doc_txt = str(st.session_state.document_text)
+        char_count = len(doc_txt)
+        word_count = len(doc_txt.split())
+        page_matches = re.findall(r"(?m)^Page \d+:", doc_txt)
+        page_count = len(page_matches) if page_matches else max(1, word_count // 250)
+
+        col_m1, col_m2, col_m3 = st.columns(3)
+        with col_m1:
+            st.metric("Pages Extracted", f"{page_count} page(s)")
+        with col_m2:
+            st.metric("Total Words", f"{word_count:,}")
+        with col_m3:
+            st.metric("Characters", f"{char_count:,}")
+
+        if char_count < 350:
+            st.info(
+                f"ℹ️ **Brief excerpt loaded ({char_count} characters / {word_count} words)**. "
+                "This document is a short test fixture (e.g. sample.pdf). For an in-depth legal triage with "
+                "comprehensive obligations, financial schedules, and termination rights, upload a full contract "
+                "or select an expert-annotated agreement from the **CUAD Benchmark** tab."
+            )
 
         with st.expander("View extracted document text"):
             st.text(st.session_state.document_text)

@@ -462,9 +462,20 @@ def find_relevant_passages(pages, question, max_passages=5):
     }
 
     expanded_label_words = set(label_words)
+    combined_query_text = f"{question_lower} {clause_label} {details.lower()}"
     for label, terms in related_terms.items():
-        if label in clause_label:
+        if label in combined_query_text or any(len(w) > 3 and w in combined_query_text for w in label.split()):
             expanded_label_words.update(terms)
+
+    # Check if question is asking about parties, agreement name, or dates
+    is_preamble_question = bool(
+        re.search(
+            r"\b(parties|party|who are the parties|who is involved|who signed|between whom|"
+            r"agreement date|effective date|date of (the|this) (contract|agreement)|"
+            r"document name|contract name|title)\b",
+            question_lower,
+        )
+    )
 
     # Clause-level BM25 retrieval over stemmed terms.
     clauses = segment_clauses(pages)
@@ -474,8 +485,6 @@ def find_relevant_passages(pages, question, max_passages=5):
     query_terms = {stem(w) for w in question_words | expanded_label_words | detail_words}
     query_terms = _expand_query(query_terms)
     query_terms = {t for t in query_terms if len(t) > 1}
-    if not query_terms:
-        return []
 
     doc_tokens = [_tokens(c["text"]) for c in clauses]
     n_docs = len(clauses)
@@ -494,7 +503,7 @@ def find_relevant_passages(pages, question, max_passages=5):
             freq = tokens.count(term)
             if not freq:
                 continue
-            idf = math.log(1 + (n_docs - doc_freq[term] + 0.5) / (doc_freq[term] + 0.5))
+            idf = math.log(1 + (n_docs - doc_freq.get(term, 0) + 0.5) / (doc_freq.get(term, 0) + 0.5))
             score += idf * freq * (k1 + 1) / (
                 freq + k1 * (1 - b + b * len(tokens) / avg_len)
             )
@@ -505,6 +514,19 @@ def find_relevant_passages(pages, question, max_passages=5):
                 "clause_id": clause["clause_id"],
                 "text": re.sub(r"\s+", " ", clause["text"]).strip(),
                 "score": round(score, 3),
+            })
+
+    # If asking about parties or preamble, guarantee the first clause is included
+    if is_preamble_question and clauses:
+        first_clause_text = re.sub(r"\s+", " ", clauses[0]["text"]).strip()
+        already_included = any(r["text"] == first_clause_text for r in results)
+        if not already_included:
+            results.insert(0, {
+                "page": clauses[0]["page"],
+                "page_end": clauses[0]["page_end"],
+                "clause_id": clauses[0]["clause_id"],
+                "text": first_clause_text,
+                "score": 50.0,
             })
 
     results.sort(key=lambda passage: passage["score"], reverse=True)

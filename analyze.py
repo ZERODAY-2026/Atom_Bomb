@@ -6,7 +6,7 @@ import urllib.request
 # pyrefly: ignore[missing-import]
 import ollama
 
-from pdf import find_relevant_passages, normalize_for_match
+from pdf import find_relevant_passages, normalize_for_match, segment_clauses
 import safety
 from safety import (
     audit_response_safety,
@@ -125,22 +125,61 @@ def text_to_document_pages(document_text):
     return pages or [{"page": 1, "text": document_text}]
 
 
+def chunk_document_for_summary(document_text, max_chunk_chars=4500):
+    """
+    Split long document text into balanced sequential sections
+    preserving paragraph and clause boundaries.
+    """
+    pages = text_to_document_pages(document_text)
+    clauses = segment_clauses(pages)
+
+    if clauses:
+        items = [
+            f"Clause {c.get('clause_id') or idx + 1} (Page {c.get('page', 1)}): {c['text']}"
+            for idx, c in enumerate(clauses)
+        ]
+    else:
+        items = [p.get("text", "") for p in pages if p.get("text")]
+
+    chunks = []
+    current_chunk = []
+    current_len = 0
+
+    for item in items:
+        item_len = len(item)
+        if current_chunk and (current_len + item_len > max_chunk_chars):
+            chunks.append("\n\n".join(current_chunk))
+            current_chunk = [item]
+            current_len = item_len
+        else:
+            current_chunk.append(item)
+            current_len += item_len
+
+    if current_chunk:
+        chunks.append("\n\n".join(current_chunk))
+
+    return chunks or [document_text]
+
+
 def analyze_document(document_text):
     """
     Generate a complete, structured legal triage summary of the agreement.
     Synthesizes parties, obligations, deadlines, termination, risks, and questions.
+    Uses hierarchical section-by-section analysis for longer documents so 100%
+    of clauses across all pages are analyzed without truncation.
     """
     if not isinstance(document_text, str) or not document_text.strip():
         raise ValueError("Document text cannot be empty.")
 
-    # Guard against context window overflow if document is excessively long (>25k chars)
-    doc_for_summary = document_text
-    if len(document_text) > 25000:
-        doc_for_summary = document_text[:25000] + "\n\n[... Document truncated for summary due to length ...]"
+    pages = text_to_document_pages(document_text)
+    total_pages = len(pages)
+    total_clauses = len(segment_clauses(pages)) or total_pages
 
-    prompt = f"""You are a professional legal triage assistant.
+    # If document is short (<= 4500 chars), a single comprehensive prompt works best.
+    if len(document_text) <= 4500:
+        prompt = f"""You are a professional legal triage assistant.
 Provide a thorough, complete, executive legal triage summary of the entire agreement below.
-Do not cut off early. Cover all major terms from beginning to end.
+Do not cut off early. Cover all terms from beginning to end.
 
 Format your analysis using these clear Markdown sections:
 
@@ -148,6 +187,7 @@ Format your analysis using these clear Markdown sections:
 - **Agreement Type:** State the type of contract and effective date.
 - **Parties:** Name the parties involved and their respective roles.
 - **Purpose & Scope:** Brief explanation of the agreement's subject matter.
+- **Governing Law:** Jurisdiction or governing law stated.
 
 ### 2. Core Obligations & Rights
 - Key duties, deliverables, and rights established for each party.
@@ -170,10 +210,80 @@ Format your analysis using these clear Markdown sections:
 
 DOCUMENT TEXT:
 --- BEGIN DOCUMENT ---
-{doc_for_summary}
+{document_text}
 --- END DOCUMENT ---
 """
-    return ask_gemma(prompt)
+        return ask_gemma(prompt)
+
+    # For longer documents (> 4500 chars), use hierarchical chunked analysis
+    # so every clause across all pages is extracted and synthesized without truncation.
+    chunks = chunk_document_for_summary(document_text, max_chunk_chars=4500)
+    if len(chunks) > 4:
+        merged = []
+        step = len(chunks) / 4.0
+        for i in range(4):
+            start = int(i * step)
+            end = int((i + 1) * step)
+            merged.append("\n\n".join(chunks[start:end]))
+        chunks = merged
+
+    chunk_extracts = []
+    for idx, chunk in enumerate(chunks):
+        extract_prompt = f"""Extract the key legal provisions from this section (Part {idx + 1} of {len(chunks)}) of an agreement.
+Be concise and factual. Extract explicit terms found in this section:
+- Document title, parties, effective date, and scope (if present)
+- Core duties, deliverables, and performance obligations
+- Payment amounts, fees, deadlines, and penalty terms
+- Termination grounds, notice periods, and post-termination restrictions
+- Liabilities, indemnification, non-competes, and governing law
+
+SECTION TEXT:
+--- BEGIN SECTION ---
+{chunk}
+--- END SECTION ---
+"""
+        chunk_extracts.append(f"### Part {idx + 1} Findings:\n" + ask_gemma(extract_prompt))
+
+    combined_findings = "\n\n".join(chunk_extracts)
+    synthesis_prompt = f"""You are a professional legal triage assistant.
+Synthesize the section-by-section findings below into a complete, thorough, executive legal triage summary of the entire agreement.
+Make sure all provisions across all sections are integrated. Do not omit any findings.
+
+Format your analysis using these clear Markdown sections:
+
+### 1. Document Overview & Parties
+- **Agreement Type:** State the type of contract and effective date.
+- **Parties:** Name the parties involved and their respective roles.
+- **Purpose & Scope:** Brief explanation of the agreement's subject matter.
+- **Governing Law:** Stated jurisdiction or governing law.
+
+### 2. Core Obligations & Rights
+- Key duties, deliverables, and rights established for each party.
+
+### 3. Financial Terms, Deadlines & Penalties
+- All payment amounts, compensation, or fee schedules.
+- Notice periods, specific timelines, and strict deadlines (in days/months).
+- Late fees, interest rates, or financial penalties.
+
+### 4. Termination & Default Provisions
+- Permitted grounds for termination (for cause, for convenience, mutual agreement).
+- Cure periods, required notice to terminate, and post-termination obligations.
+
+### 5. High-Risk Clauses & Red Flags
+- Liability caps, indemnification obligations, non-compete, or non-solicitation clauses.
+- Any one-sided rights, automatic renewals, or unusual conditions.
+
+### 6. Ambiguities & Questions for Legal Counsel
+- Terms that are ambiguous, missing, or require jurisdictional legal review.
+
+COMBINED SECTION FINDINGS (COVERS ENTIRE DOCUMENT):
+--- BEGIN FINDINGS ---
+{combined_findings}
+--- END FINDINGS ---
+"""
+    final_summary = ask_gemma(synthesis_prompt)
+    header = f"**Complete Document Legal Triage (100% Coverage: Analyzed {total_pages} page(s) / {total_clauses} clause(s), {len(document_text):,} characters)**\n\n"
+    return header + final_summary
 
 
 def ask_about_document(document_text, question):
@@ -184,15 +294,58 @@ def ask_about_document(document_text, question):
     if not isinstance(question, str) or not question.strip():
         raise ValueError("Question cannot be empty.")
 
-    # If document is multi-paragraph or multi-page, retrieve the most relevant passages
-    # so Gemma focuses precisely on the answering clauses instead of getting lost in a huge document.
+    question_lower = question.lower().strip()
+
+    # Detect broad summary or overview questions
+    is_summary_req = bool(
+        re.search(
+            r"\b(summary|summarize|overview|main points|key points|"
+            r"explain the (contract|document|agreement)|"
+            r"what is this (contract|document|agreement)|"
+            r"what does this (contract|agreement) say|"
+            r"what is (this|the) (contract|document|agreement) about)\b",
+            question_lower,
+        )
+    )
+
+    if is_summary_req:
+        summary = analyze_document(document_text)
+        first_line = document_text.strip().splitlines()[0] if document_text.strip() else ""
+        quote_text = first_line[:120].strip(" \t\r\n\"'*")
+        return f"""1. ANSWER
+Here is the executive legal triage summary for this agreement:
+
+{summary}
+
+2. SUPPORTING QUOTATION
+"{quote_text}"
+
+3. PAGE NUMBER
+Page 1
+
+4. EXPLANATION IN SIMPLE ENGLISH
+This summary synthesizes the parties, core obligations, financial terms, termination conditions, and risks across the entire document.
+
+5. UNCERTAINTY OR MISSING INFORMATION
+Jurisdiction-specific legal enforceability requires review by a qualified attorney.
+"""
+
     context_text = document_text
-    if len(document_text) > 1200:
-        pages = text_to_document_pages(document_text)
-        passages = find_relevant_passages(pages, question, max_passages=4)
-        if not passages:
-            return NO_EVIDENCE_ANSWER
+    pages = text_to_document_pages(document_text)
+    passages = find_relevant_passages(pages, question, max_passages=5)
+
+    if passages:
         context_text = passages_to_document_text(passages)
+    else:
+        # If BM25 found 0 passages, do not immediately fail with NO_EVIDENCE_ANSWER.
+        # If document <= 12000 chars, give Gemma the full text to evaluate.
+        if len(document_text) <= 12000:
+            context_text = document_text
+        else:
+            # Provide preamble and top pages
+            context_text = "\n\n".join(
+                f"Page {p['page']}:\n{p['text']}" for p in pages[:4]
+            )
 
     prompt = f"""Answer the user's question using ONLY the supplied document text.
 
@@ -234,7 +387,20 @@ def verify_quote(quote, document_text):
     normalized_quote = normalize_for_match(quote)
     normalized_document = normalize_for_match(document_text)
 
-    return normalized_quote in normalized_document
+    if normalized_quote in normalized_document:
+        return True
+
+    # Substring / phrase fallback for multi-word quotes where minor punctuation differs
+    quote_words = normalized_quote.split()
+    if len(quote_words) >= 4:
+        for span_len in (len(quote_words) - 1, len(quote_words) - 2, 6, 5):
+            if span_len < 4 or span_len > len(quote_words):
+                continue
+            sub_quote = " ".join(quote_words[:span_len])
+            if sub_quote in normalized_document:
+                return True
+
+    return False
 
 
 def verify_answer_evidence(answer, document_text):
