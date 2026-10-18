@@ -1,10 +1,11 @@
-
 """
 ClauseGuard safety checks.
 
 These checks provide basic safeguards, not a guarantee that
 an answer is legally correct or safe.
 """
+
+import re
 
 
 # Questions that may require professional legal judgment.
@@ -29,6 +30,17 @@ INJECTION_PATTERNS = [
     r"\bprint (?:your )?(?:system prompt|hidden instructions)\b",
 ]
 
+# Pre-compiled regular expressions for fast matching without repetitive compilation overhead
+HIGH_STAKES_COMPILED = [
+    (pattern, re.compile(pattern, flags=re.IGNORECASE))
+    for pattern in HIGH_STAKES_PATTERNS
+]
+
+INJECTION_COMPILED = [
+    (pattern, re.compile(pattern, flags=re.IGNORECASE))
+    for pattern in INJECTION_PATTERNS
+]
+
 
 def check_question_safety(question):
     """
@@ -36,7 +48,6 @@ def check_question_safety(question):
 
     This does not reject the question. It flags the need for caution.
     """
-
     if not isinstance(question, str) or not question.strip():
         return {
             "requires_caution": True,
@@ -45,8 +56,8 @@ def check_question_safety(question):
 
     normalized_question = question.casefold()
 
-    for pattern in HIGH_STAKES_PATTERNS:
-        if __import__("re").search(pattern, normalized_question):
+    for _, compiled_re in HIGH_STAKES_COMPILED:
+        if compiled_re.search(normalized_question):
             return {
                 "requires_caution": True,
                 "reason": (
@@ -69,19 +80,15 @@ def detect_prompt_injection(document_text):
     A match is only a warning signal. Ordinary legal text can contain
     these phrases, and malicious instructions can use other wording.
     """
-
     if not isinstance(document_text, str) or not document_text.strip():
         return {
             "detected": False,
             "matches": [],
         }
 
-    import re
-
     matches = []
-
-    for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, document_text, flags=re.IGNORECASE):
+    for pattern, compiled_re in INJECTION_COMPILED:
+        if compiled_re.search(document_text):
             matches.append(pattern)
 
     return {
@@ -90,11 +97,17 @@ def detect_prompt_injection(document_text):
     }
 
 
-def build_safety_notice(question, document_text):
-    """Create safety notices for the application to display."""
-
+def build_safety_notice(question, document_text, cached_injection_check=None):
+    """
+    Create safety notices for the application to display.
+    Accepts an optional cached_injection_check to avoid re-scanning full documents on every query.
+    """
     question_check = check_question_safety(question)
-    injection_check = detect_prompt_injection(document_text)
+
+    if cached_injection_check is not None:
+        injection_check = cached_injection_check
+    else:
+        injection_check = detect_prompt_injection(document_text)
 
     notices = []
 

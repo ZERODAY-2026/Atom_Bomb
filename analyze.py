@@ -1,3 +1,9 @@
+"""
+analyze.py - Gemma inference and legal document reasoning orchestrator.
+Optimized for low-latency local inference with bounded token prediction,
+keep_alive caching, streaming generators, and targeted passage extraction.
+"""
+
 import re
 import ollama
 import safety
@@ -27,9 +33,11 @@ SAFETY AND ACCURACY RULES:
 """
 
 
-def ask_gemma(prompt):
-    """Send a prompt to the locally running Ollama model."""
-
+def ask_gemma(prompt, num_predict=768):
+    """
+    Send a prompt to the locally running Ollama model.
+    Optimized with keep_alive to avoid cold reloads and num_predict to cap generation time.
+    """
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("The prompt must be a non-empty string.")
 
@@ -39,15 +47,48 @@ def ask_gemma(prompt):
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
-        options={"temperature": 0},
+        options={
+            "temperature": 0,
+            "num_predict": num_predict,
+            "num_ctx": 2048,
+        },
+        keep_alive="1h",
     )
 
     return response["message"]["content"]
 
 
+def ask_gemma_stream(prompt, num_predict=768):
+    """
+    Stream tokens from Ollama to achieve sub-second Time To First Token.
+    Yields string text chunks as they are generated.
+    """
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("The prompt must be a non-empty string.")
+
+    response = ollama.chat(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        options={
+            "temperature": 0,
+            "num_predict": num_predict,
+            "num_ctx": 2048,
+        },
+        stream=True,
+        keep_alive="1h",
+    )
+
+    for chunk in response:
+        content = chunk.get("message", {}).get("content", "")
+        if content:
+            yield content
+
+
 def analyze_document(document_text):
     """Summarize a document and identify important terms."""
-
     if not isinstance(document_text, str) or not document_text.strip():
         raise ValueError("Document text cannot be empty.")
 
@@ -82,20 +123,13 @@ DOCUMENT TEXT:
 {document_text}
 --- END DOCUMENT ---
 """
+    # Summary requires more output tokens than a standard single-question answer
+    return ask_gemma(prompt, num_predict=1024)
 
-    return ask_gemma(prompt)
 
-
-def ask_about_document(document_text, question):
-    """Answer a question using the supplied document as evidence."""
-
-    if not isinstance(document_text, str) or not document_text.strip():
-        raise ValueError("Document text cannot be empty.")
-
-    if not isinstance(question, str) or not question.strip():
-        raise ValueError("Question cannot be empty.")
-
-    prompt = f"""
+def build_question_prompt(document_text, question):
+    """Helper to assemble the question prompt cleanly."""
+    return f"""
 Answer the user's question using only the supplied document text.
 
 USER QUESTION:
@@ -123,28 +157,31 @@ DOCUMENT TEXT:
 --- END DOCUMENT ---
 """
 
-    return ask_gemma(prompt)
 
+def ask_about_document(document_text, question):
+    """Answer a question using the supplied document as evidence."""
+    if not isinstance(document_text, str) or not document_text.strip():
+        raise ValueError("Document text cannot be empty.")
 
-if __name__ == "__main__":
-    print("Testing local Gemma connection...")
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("Question cannot be empty.")
 
-    answer = ask_gemma(
-        "Explain a contract termination clause in two simple sentences."
-    )
+    prompt = build_question_prompt(document_text, question)
+    return ask_gemma(prompt, num_predict=768)
 
-    print("\nGEMMA RESPONSE")
-    print("=" * 50)
-    print(answer)
 
 def verify_quote(quote, document_text):
     """Check whether a quotation appears in the supplied document text."""
-
     if not isinstance(quote, str) or not quote.strip():
         return False
 
     if not isinstance(document_text, str) or not document_text.strip():
         return False
+
+    # Fast check first before full split-join allocation
+    quote_clean = quote.strip().casefold()
+    if quote_clean in document_text.casefold():
+        return True
 
     # Normalize whitespace and capitalization before comparing.
     normalized_quote = " ".join(quote.split()).casefold()
@@ -152,9 +189,9 @@ def verify_quote(quote, document_text):
 
     return normalized_quote in normalized_document
 
+
 def verify_answer_evidence(answer, document_text):
     """Check the supporting-quotation section of an answer."""
-
     if not isinstance(answer, str) or not answer.strip():
         return {
             "status": "UNVERIFIED",
@@ -205,7 +242,9 @@ def verify_answer_evidence(answer, document_text):
         "quote": quote,
     }
 
-def ask_about_document_with_verification(document_text, question):
+
+def ask_about_document_with_verification(document_text, question, cached_safety=None):
+    """Answer a document question and verify citations."""
     answer = ask_about_document(document_text, question)
 
     evidence_check = verify_answer_evidence(
@@ -216,6 +255,7 @@ def ask_about_document_with_verification(document_text, question):
     safety_result = safety.build_safety_notice(
         question,
         document_text,
+        cached_injection_check=cached_safety,
     )
 
     return {
@@ -224,9 +264,9 @@ def ask_about_document_with_verification(document_text, question):
         "safety": safety_result,
     }
 
+
 def passages_to_document_text(passages):
     """Convert extracted PDF passages into text for Gemma."""
-
     if not isinstance(passages, list) or not passages:
         raise ValueError("Passages must be a non-empty list.")
 
@@ -254,19 +294,20 @@ def passages_to_document_text(passages):
 
     return "\n\n".join(formatted_passages)
 
-def ask_about_passages(passages, question):
-    """Answer a question using extracted PDF passages."""
 
+def ask_about_passages(passages, question, cached_safety=None):
+    """Answer a question using extracted PDF passages."""
     document_text = passages_to_document_text(passages)
 
     return ask_about_document_with_verification(
         document_text,
         question,
+        cached_safety=cached_safety,
     )
+
 
 def verify_passage_evidence(answer, passages):
     """Find the source passage and page for a supporting quotation."""
-
     document_text = passages_to_document_text(passages)
 
     check = verify_answer_evidence(answer, document_text)
@@ -290,3 +331,13 @@ def verify_passage_evidence(answer, passages):
         "status": "UNVERIFIED",
         "message": "Could not match the quotation to an individual passage.",
     }
+
+
+if __name__ == "__main__":
+    print("Testing local Gemma connection...")
+    answer = ask_gemma(
+        "Explain a contract termination clause in two simple sentences."
+    )
+    print("\nGEMMA RESPONSE")
+    print("=" * 50)
+    print(answer)
