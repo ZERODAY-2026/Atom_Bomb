@@ -6,6 +6,9 @@ venv/
 *.pdf
 *.txt
 !requirements.txt
+!tests/fixtures/*.pdf
+!samples/*.pdf
+.pytest_cache/
 *.docx
 *.doc
 .DS_Store
