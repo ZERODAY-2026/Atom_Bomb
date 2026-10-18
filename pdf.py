@@ -39,6 +39,12 @@ def extract_pdf(pdf_path):
     if not pages:
         raise ValueError("The PDF contains no pages.")
 
+    if all(not page["text"].strip() for page in pages):
+        raise ValueError(
+            "No extractable text found. "
+            "This may be a scanned PDF requiring OCR."
+        )
+
     return pages
 
 
