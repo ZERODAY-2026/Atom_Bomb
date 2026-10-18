@@ -84,6 +84,30 @@ def test_extract_text_document(tmp_path):
     assert len(extract_document(text_file)) == len(pages)
 
 
+def test_extract_json_document(tmp_path):
+    import json
+    json_file = tmp_path / "contract.json"
+    json_file.write_text(json.dumps({"contract": "Clause 1: Notice period is 45 days."}), encoding="utf-8")
+    pages = extract_document(json_file)
+    assert len(pages) >= 1
+    assert "Notice period is 45 days" in pages[0]["text"]
+
+
+def test_extract_cuad_json_document(tmp_path):
+    import json
+    cuad_file = tmp_path / "cuad.json"
+    data = {
+        "data": [{
+            "title": "Commercial Agreement",
+            "paragraphs": [{"context": "Parties agree to arbitrate all disputes in London."}]
+        }]
+    }
+    cuad_file.write_text(json.dumps(data), encoding="utf-8")
+    pages = extract_document(cuad_file)
+    assert len(pages) >= 1
+    assert "arbitrate all disputes in London" in pages[0]["text"]
+
+
 def test_find_relevant_passages():
     pages = extract_pdf(FIXTURES / "sample.pdf")
     question = "How many days notice must a tenant provide?"

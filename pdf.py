@@ -1,3 +1,4 @@
+import json
 import math
 import re
 import unicodedata
@@ -153,10 +154,68 @@ def extract_text_document(file_path):
     return pages
 
 
+def extract_json_document(file_path):
+    """
+    Extract legal text from a JSON document or CUAD dataset.
+    Returns structured pages of text.
+    """
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Document not found: {path}")
+    if path.stat().st_size == 0:
+        raise ValueError("The document is empty (0 bytes).")
+
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+
+    # Check CUAD SQuAD-format dataset
+    if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+        pages = []
+        page_idx = 1
+        for item in data["data"]:
+            for para in item.get("paragraphs", []):
+                ctx = para.get("context", "").strip()
+                if ctx:
+                    lines = ctx.splitlines()
+                    for i in range(0, len(lines), 50):
+                        chunk = "\n".join(lines[i : i + 50]).strip()
+                        if chunk:
+                            pages.append({"page": page_idx, "text": normalize_text(chunk)})
+                            page_idx += 1
+        if pages:
+            return pages
+
+    # Standard JSON contract or text structure
+    content = ""
+    if isinstance(data, dict):
+        for key in ("text", "content", "contract", "context", "document", "agreement"):
+            if isinstance(data.get(key), str) and data[key].strip():
+                content = data[key].strip()
+                break
+        if not content:
+            content = "\n\n".join(f"{k.upper()}:\n{v}" for k, v in data.items() if str(v).strip())
+    elif isinstance(data, list):
+        content = "\n\n".join(str(x) for x in data if str(x).strip())
+    elif isinstance(data, str):
+        content = data
+
+    if not content.strip():
+        raise ValueError("No readable legal text found in this JSON document.")
+
+    lines = normalize_text(content).splitlines()
+    pages = []
+    for i in range(0, len(lines), 50):
+        chunk = "\n".join(lines[i : i + 50]).strip()
+        if chunk:
+            pages.append({"page": (i // 50) + 1, "text": chunk})
+
+    return pages
+
+
 def extract_document(file_path):
     """
     General entry point for document extraction.
-    Supports PDF and plain text documents (.txt, .md).
+    Supports PDF, plain text documents (.txt, .md), and JSON datasets (.json).
     """
     path = Path(file_path)
     suffix = path.suffix.lower()
@@ -165,12 +224,17 @@ def extract_document(file_path):
         return extract_pdf(path)
     elif suffix in [".txt", ".md", ".markdown", ".text"]:
         return extract_text_document(path)
+    elif suffix == ".json":
+        return extract_json_document(path)
     else:
-        # Default try PDF first, fallback to text
+        # Default try PDF first, then JSON, then fallback to text
         try:
             return extract_pdf(path)
         except Exception:
-            return extract_text_document(path)
+            try:
+                return extract_json_document(path)
+            except Exception:
+                return extract_text_document(path)
 
 
 def _assign_ids(passages):
